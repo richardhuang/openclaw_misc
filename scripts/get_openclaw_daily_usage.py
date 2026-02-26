@@ -42,6 +42,18 @@ from datetime import datetime, timedelta
 import sys
 import uuid
 
+
+def format_tokens(tokens: int) -> str:
+    """Format tokens with human-readable units (K, M, G, etc.)"""
+    if tokens >= 1_000_000_000:
+        return f"{tokens / 1_000_000_000:.2f}B"
+    elif tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:.2f}M"
+    elif tokens >= 1_000:
+        return f"{tokens / 1_000:.2f}K"
+    else:
+        return str(tokens)
+
 try:
     import websockets
 except ImportError:
@@ -253,14 +265,16 @@ def print_usage_summary(daily_usage: dict) -> None:
 
     total_tokens = 0
     for date, tokens in sorted(daily_usage.items(), reverse=True):
-        print(f"{date}: {tokens:,} tokens")
+        formatted = format_tokens(tokens)
+        print(f"{date}: {formatted} tokens ({tokens:,})")
         total_tokens += tokens
 
     print("-"*50)
-    print(f"TOTAL TOKENS: {total_tokens:,}")
+    print(f"TOTAL TOKENS: {format_tokens(total_tokens)} ({total_tokens:,})")
     print(f"DAYS WITH USAGE: {len(daily_usage)}")
     if len(daily_usage) > 0:
-        print(f"AVERAGE PER DAY: {total_tokens // len(daily_usage):,}")
+        avg = total_tokens // len(daily_usage)
+        print(f"AVERAGE PER DAY: {format_tokens(avg)} ({avg:,})")
 
 
 def print_database_summary(db_path: str) -> None:
@@ -275,14 +289,15 @@ def print_database_summary(db_path: str) -> None:
     cursor.execute("SELECT SUM(tokens_used), COUNT(*), AVG(tokens_used) FROM daily_usage")
     total, count, avg = cursor.fetchone()
     print(f"Total entries: {count}")
-    print(f"Total tokens: {total:,}")
+    print(f"Total tokens: {format_tokens(total)} ({total:,})")
     if avg:
-        print(f"Average per day: {avg:,.0f}")
+        print(f"Average per day: {format_tokens(avg)} ({avg:,.0f})")
 
     cursor.execute("SELECT date, tokens_used FROM daily_usage ORDER BY date DESC LIMIT 7")
     print("\nRecent 7 days:")
     for row in cursor.fetchall():
-        print(f"  {row[0]}: {row[1]:,} tokens")
+        formatted = format_tokens(row[1])
+        print(f"  {row[0]}: {formatted} tokens ({row[1]:,})")
 
     conn.close()
 
