@@ -41,6 +41,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import sys
 import uuid
+import platform
 
 
 def format_tokens(tokens: int) -> str:
@@ -53,6 +54,19 @@ def format_tokens(tokens: int) -> str:
         return f"{tokens / 1_000:.2f}K"
     else:
         return str(tokens)
+
+
+def get_tool_name() -> str:
+    """Detect the tool name based on the gateway URL or environment"""
+    # Check if we're accessing OpenClaw gateway
+    if os.getenv('OPENCLAW_TOKEN'):
+        return "openclaw"
+    # Check for other tools via environment variables
+    if os.getenv('CLAUDE_API_KEY') or os.getenv('ANTHROPIC_API_KEY'):
+        return "claude"
+    if os.getenv('QWEN_API_KEY') or os.getenv('DASHSCOPE_API_KEY'):
+        return "qwen"
+    return "unknown"
 
 try:
     import websockets
@@ -238,29 +252,35 @@ def parse_usage_response(response: dict) -> dict:
     return daily_usage
 
 
-def save_to_database(db_path: str, daily_usage: dict) -> None:
+def save_to_database(db_path: str, daily_usage: dict, tool_name: str) -> None:
     """Save usage data to SQLite database"""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    # Ensure tool_name column exists
+    cursor.execute("PRAGMA table_info(daily_usage)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "tool_name" not in columns:
+        cursor.execute("ALTER TABLE daily_usage ADD COLUMN tool_name TEXT DEFAULT 'unknown'")
+
     for date, tokens in daily_usage.items():
         cursor.execute('''
-            INSERT OR REPLACE INTO daily_usage (date, tokens_used)
-            VALUES (?, ?)
-        ''', (date, tokens))
+            INSERT OR REPLACE INTO daily_usage (date, tokens_used, tool_name)
+            VALUES (?, ?, ?)
+        ''', (date, tokens, tool_name))
 
     conn.commit()
     conn.close()
 
 
-def print_usage_summary(daily_usage: dict) -> None:
+def print_usage_summary(daily_usage: dict, tool_name: str = "unknown") -> None:
     """Print a summary of the usage data"""
     if not daily_usage:
         print("No usage data available.")
         return
 
     print("\n" + "="*50)
-    print("DAILY TOKEN USAGE SUMMARY")
+    print(f"DAILY TOKEN USAGE SUMMARY [{tool_name.upper()}]")
     print("="*50)
 
     total_tokens = 0
@@ -282,16 +302,40 @@ def print_database_summary(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    print("\n" + "="*50)
+    print("\n" + "="*60)
     print("DATABASE SUMMARY")
-    print("="*50)
+    print("="*60)
 
-    cursor.execute("SELECT SUM(tokens_used), COUNT(*), AVG(tokens_used) FROM daily_usage")
-    total, count, avg = cursor.fetchone()
-    print(f"Total entries: {count}")
-    print(f"Total tokens: {format_tokens(total)} ({total:,})")
-    if avg:
-        print(f"Average per day: {format_tokens(avg)} ({avg:,.0f})")
+    # Check if tool_name column exists
+    cursor.execute("PRAGMA table_info(daily_usage)")
+    columns = [col[1] for col in cursor.fetchall()]
+    has_tool_name = "tool_name" in columns
+
+    if has_tool_name:
+        cursor.execute("SELECT SUM(tokens_used), COUNT(*), AVG(tokens_used), tool_name FROM daily_usage GROUP BY tool_name")
+        rows = cursor.fetchall()
+        for row in rows:
+            total, count, avg, tool_name = row
+            print(f"\n[{tool_name.upper()}]")
+            print(f"  Total entries: {count}")
+            print(f"  Total tokens: {format_tokens(total)} ({total:,})")
+            if avg:
+                print(f"  Average per day: {format_tokens(avg)} ({avg:,.0f})")
+
+        # Get date range per tool
+        cursor.execute("SELECT MIN(date), MAX(date), tool_name FROM daily_usage GROUP BY tool_name")
+        print("\nDate ranges:")
+        for row in cursor.fetchall():
+            min_date, max_date, tool_name = row
+            print(f"  [{tool_name}]: {min_date} to {max_date}")
+    else:
+        # Old format without tool_name
+        cursor.execute("SELECT SUM(tokens_used), COUNT(*), AVG(tokens_used) FROM daily_usage")
+        total, count, avg = cursor.fetchone()
+        print(f"Total entries: {count}")
+        print(f"Total tokens: {format_tokens(total)} ({total:,})")
+        if avg:
+            print(f"Average per day: {format_tokens(avg)} ({avg:,.0f})")
 
     cursor.execute("SELECT date, tokens_used FROM daily_usage ORDER BY date DESC LIMIT 7")
     print("\nRecent 7 days:")
@@ -303,18 +347,19 @@ def print_database_summary(db_path: str) -> None:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description='Get OpenClaw daily token usage')
-    parser.add_argument('--url', default='http://127.0.0.1:18789', help='OpenClaw gateway URL')
-    parser.add_argument('--token', help='OpenClaw gateway token')
+    parser = argparse.ArgumentParser(description='Get AI tool daily token usage')
+    parser.add_argument('--url', default='http://127.0.0.1:18789', help='AI gateway URL')
+    parser.add_argument('--token', help='AI gateway token')
     parser.add_argument('--days', type=int, default=7, help='Number of days to fetch (default: 7)')
     parser.add_argument('--client', default='openclaw-control-ui', help='Client ID (default: openclaw-control-ui)')
     parser.add_argument('--save', action='store_true', help='Save data to database')
     parser.add_argument('--status', action='store_true', help='Show database status only')
     parser.add_argument('--list-all', action='store_true', help='List all data in database')
+    parser.add_argument('--tool', help='Tool name (openclaw, claude, qwen, etc.)')
 
     args = parser.parse_args()
 
-    db_path = os.path.expanduser("~/.openclaw_usage.db")
+    db_path = os.path.expanduser("~/.ai_token_usage.db")
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -323,6 +368,7 @@ async def main():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT UNIQUE,
             tokens_used INTEGER,
+            tool_name TEXT DEFAULT 'unknown',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -336,10 +382,23 @@ async def main():
     if args.list_all:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT date, tokens_used FROM daily_usage ORDER BY date DESC")
+
+        # Check if tool_name column exists
+        cursor.execute("PRAGMA table_info(daily_usage)")
+        columns = [col[1] for col in cursor.fetchall()]
+        has_tool_name = "tool_name" in columns
+
         print("\nAll recorded usage data:")
-        for row in cursor.fetchall():
-            print(f"  {row[0]}: {row[1]:,} tokens")
+        if has_tool_name:
+            cursor.execute("SELECT date, tokens_used, tool_name FROM daily_usage ORDER BY date DESC")
+            for row in cursor.fetchall():
+                formatted = format_tokens(row[1])
+                print(f"  {row[0]}: {formatted} tokens ({row[1]:,}) [{row[2]}]")
+        else:
+            cursor.execute("SELECT date, tokens_used FROM daily_usage ORDER BY date DESC")
+            for row in cursor.fetchall():
+                formatted = format_tokens(row[1])
+                print(f"  {row[0]}: {formatted} tokens ({row[1]:,})")
         conn.close()
         return
 
@@ -352,6 +411,9 @@ async def main():
         print('  python3 get_openclaw_daily_usage.py --days 7')
         return
 
+    # Determine tool name
+    tool_name = args.tool or get_tool_name()
+
     response = await get_usage_via_websocket(args.url, token, args.days, args.client)
 
     if response:
@@ -359,10 +421,10 @@ async def main():
 
         if daily_usage:
             if args.save:
-                save_to_database(db_path, daily_usage)
+                save_to_database(db_path, daily_usage, tool_name)
                 print(f"\nSaved {len(daily_usage)} days of data to database")
 
-            print_usage_summary(daily_usage)
+            print_usage_summary(daily_usage, tool_name)
             print_database_summary(db_path)
         else:
             print("\nCould not parse usage data from response.")
