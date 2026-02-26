@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to monitor log file and format output beautifully
-LOG_FILE="/tmp/openclaw/openclaw-2026-02-25.log"
+LOG_FILE="/tmp/openclaw/openclaw-`date -I`.log"
 
 if [ ! -f "$LOG_FILE" ]; then
     echo "Error: Log file $LOG_FILE does not exist."
