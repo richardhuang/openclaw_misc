@@ -1,7 +1,30 @@
 #!/bin/bash
 
 # Script to monitor log file and format output beautifully
-LOG_FILE="/tmp/openclaw/openclaw-`date -I`.log"
+# Auto-detects the latest OpenClaw log file
+
+# Find the latest log file in /tmp/openclaw/
+find_latest_log() {
+    local log_dir="/tmp/openclaw"
+
+    if [ ! -d "$log_dir" ]; then
+        echo "Error: Log directory $log_dir does not exist."
+        exit 1
+    fi
+
+    # Find the latest .log file
+    local latest_file=$(ls -t "$log_dir"/*.log 2>/dev/null | head -1)
+
+    if [ -z "$latest_file" ]; then
+        echo "Error: No log files found in $log_dir."
+        exit 1
+    fi
+
+    echo "$latest_file"
+}
+
+# Use command line argument if provided, otherwise auto-detect
+LOG_FILE="${1:-$(find_latest_log)}"
 
 if [ ! -f "$LOG_FILE" ]; then
     echo "Error: Log file $LOG_FILE does not exist."
